@@ -806,26 +806,47 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         self.config = config
         self.hidden_size = config.hidden_size
         # note: the only difference between this GPT2Model and the default Huggingface version
-        # is that the positional embeddings are removed (since we'll add those ourselves)
+        
+        # 初始化DecisionTransformerGPT2Model，移除位置嵌入（我们自己会添加）
         self.encoder = DecisionTransformerGPT2Model(config)
 
+        # 初始化各种嵌入层：
+        # 时间步嵌入
+        “”“
+        通过创建一个维度为 (config.max_ep_len, config.hidden_size) 的嵌入层来实现的。config.max_ep_len 是序列的最大长度，config.hidden_size 是隐藏层的维度（也是嵌入向量的长度）。当输入一个时间步（即序列中的位置）到这个嵌入层时，它会返回一个与该位置相关的向量。
+
+        这种方法的主要目标是将序列中的位置信息编码为一个可以被模型理解的形式。这对于 Transformer 模型来说是非常重要的，因为 Transformer 模型本身并不理解序列中元素的顺序，而位置嵌入为模型提供了这种顺序信息。
+        
+        ”“”
         self.embed_timestep = nn.Embedding(config.max_ep_len, config.hidden_size)
+
+
+
+
+        # 回报嵌入
         self.embed_return = torch.nn.Linear(1, config.hidden_size)
+
+        # 状态嵌入
         self.embed_state = torch.nn.Linear(config.state_dim, config.hidden_size)
+
+        # 动作嵌入
         self.embed_action = torch.nn.Linear(config.act_dim, config.hidden_size)
 
+        # 初始化LayerNorm层
         self.embed_ln = nn.LayerNorm(config.hidden_size)
 
         # note: we don't predict states or returns for the paper
+        # 初始化预测层：状态预测、动作预测和回报预测
         self.predict_state = torch.nn.Linear(config.hidden_size, config.state_dim)
         self.predict_action = nn.Sequential(
             *([nn.Linear(config.hidden_size, config.act_dim)] + ([nn.Tanh()] if config.action_tanh else []))
         )
         self.predict_return = torch.nn.Linear(config.hidden_size, 1)
 
-        # Initialize weights and apply final processing
+        # 初始化权重并进行后处理
         self.post_init()
 
+    # 模型前向传播
     @add_start_docstrings_to_model_forward(DECISION_TRANSFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @replace_return_docstrings(output_type=DecisionTransformerOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -892,12 +913,14 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
             attention_mask = torch.ones((batch_size, seq_length), dtype=torch.long)
 
         # embed each modality with a different head
+        # 首先对输入进行嵌入
         state_embeddings = self.embed_state(states)
         action_embeddings = self.embed_action(actions)
         returns_embeddings = self.embed_return(returns_to_go)
         time_embeddings = self.embed_timestep(timesteps)
 
         # time embeddings are treated similar to positional embeddings
+        # 然后将各种嵌入进行相加操作
         state_embeddings = state_embeddings + time_embeddings
         action_embeddings = action_embeddings + time_embeddings
         returns_embeddings = returns_embeddings + time_embeddings
@@ -912,6 +935,7 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         stacked_inputs = self.embed_ln(stacked_inputs)
 
         # to make the attention mask fit the stacked inputs, have to stack it as well
+        # 按照(R_1, s_1, a_1, R_2, s_2, a_2, ...)的形式堆叠输入
         stacked_attention_mask = (
             torch.stack((attention_mask, attention_mask, attention_mask), dim=1)
             .permute(0, 2, 1)
@@ -919,6 +943,7 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
         )
         device = stacked_inputs.device
         # we feed in the input embeddings (not word indices as in NLP) to the model
+        # 对堆叠后的输入进行编码
         encoder_outputs = self.encoder(
             inputs_embeds=stacked_inputs,
             attention_mask=stacked_attention_mask,
@@ -931,15 +956,17 @@ class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
 
         # reshape x so that the second dimension corresponds to the original
         # returns (0), states (1), or actions (2); i.e. x[:,1,t] is the token for s_t
+        # 对编码器的输出进行重塑，使得第二维度对应于原始的回报（0）、状态（1）或动作（2）
         x = x.reshape(batch_size, seq_length, 3, self.hidden_size).permute(0, 2, 1, 3)
 
-        # get predictions
-        return_preds = self.predict_return(x[:, 2])  # predict next return given state and action
-        state_preds = self.predict_state(x[:, 2])  # predict next state given state and action
-        action_preds = self.predict_action(x[:, 1])  # predict next action given state
+        # 得到预测结果
+        return_preds = self.predict_return(x[:, 2])  # 给定状态和动作预测下一个回报
+        state_preds = self.predict_state(x[:, 2])  # 给定状态和动作预测下一个状态
+        action_preds = self.predict_action(x[:, 1])   给定状态预测下一个动作
         if not return_dict:
             return (state_preds, action_preds, return_preds)
 
+        # 返回预测结果
         return DecisionTransformerOutput(
             last_hidden_state=encoder_outputs.last_hidden_state,
             state_preds=state_preds,
